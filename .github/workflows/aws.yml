@@ -1,94 +1,247 @@
-# This workflow will build and push a new container image to Amazon ECR,
-# and then will deploy a new task definition to Amazon ECS, when there is a push to the "main" branch.
-#
-# To use this workflow, you will need to complete the following set-up steps:
-#
-# 1. Create an ECR repository to store your images.
-#    For example: `aws ecr create-repository --repository-name my-ecr-repo --region us-east-2`.
-#    Replace the value of the `ECR_REPOSITORY` environment variable in the workflow below with your repository's name.
-#    Replace the value of the `AWS_REGION` environment variable in the workflow below with your repository's region.
-#
-# 2. Create an ECS task definition, an ECS cluster, and an ECS service.
-#    For example, follow the Getting Started guide on the ECS console:
-#      https://us-east-2.console.aws.amazon.com/ecs/home?region=us-east-2#/firstRun
-#    Replace the value of the `ECS_SERVICE` environment variable in the workflow below with the name you set for the Amazon ECS service.
-#    Replace the value of the `ECS_CLUSTER` environment variable in the workflow below with the name you set for the cluster.
-#
-# 3. Store your ECS task definition as a JSON file in your repository.
-#    The format should follow the output of `aws ecs register-task-definition --generate-cli-skeleton`.
-#    Replace the value of the `ECS_TASK_DEFINITION` environment variable in the workflow below with the path to the JSON file.
-#    Replace the value of the `CONTAINER_NAME` environment variable in the workflow below with the name of the container
-#    in the `containerDefinitions` section of the task definition.
-#
-# 4. Store an IAM user access key in GitHub Actions secrets named `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
-#    See the documentation for each action used below for the recommended IAM policies for this IAM user,
-#    and best practices on handling the access key credentials.
-
-name: Deploy to Amazon ECS
+name: Lnx Aws
 
 on:
-  push:
-    branches: [ "main" ]
-
-env:
-  AWS_REGION: MY_AWS_REGION                   # set this to your preferred AWS region, e.g. us-west-1
-  ECR_REPOSITORY: MY_ECR_REPOSITORY           # set this to your Amazon ECR repository name
-  ECS_SERVICE: MY_ECS_SERVICE                 # set this to your Amazon ECS service name
-  ECS_CLUSTER: MY_ECS_CLUSTER                 # set this to your Amazon ECS cluster name
-  ECS_TASK_DEFINITION: MY_ECS_TASK_DEFINITION # set this to the path to your Amazon ECS task definition
-                                               # file, e.g. .aws/task-definition.json
-  CONTAINER_NAME: MY_CONTAINER_NAME           # set this to the name of the container in the
-                                               # containerDefinitions section of your task definition
+  workflow_dispatch:
+    inputs:
+      gh_crd_auth:
+        description: "Auth Code CRD (dari remotedesktop.google.com/headless)"
+        required: true
+      gh_pc_name:
+        description: "Nama PC (tampil di aplikasi CRD)"
+        required: true
+        default: "RDP-Ubuntu"
+      gh_pin_crd:
+        description: "PIN (minimal 6 digit angka)"
+        required: true
+        default: "123321"
+      runtime_minutes:
+        description: "Durasi runtime dalam menit (maks 360; default 355)"
+        default: "355"
+      restore_mode:
+        description: "Pilih mode Firefox"
+        required: true
+        default: "restore"
+        type: choice
+        options:
+          - restore
+          - no-restore
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  deploy:
-    name: Deploy
+  crd:
     runs-on: ubuntu-latest
-    environment: production
-
+    timeout-minutes: 370
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: 🔧 Memproses input
+        id: cfg
+        run: |
+          # Validasi & normalisasi runtime
+          runtime=${{ inputs.runtime_minutes }}
+          if ! [[ "$runtime" =~ ^[0-9]+$ ]] || [ "$runtime" -gt 360 ] || [ "$runtime" -lt 6 ]; then
+            echo "Runtime tidak valid. Menggunakan default 355 menit."
+            runtime=355
+          fi
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+          # Ambil raw input auth (bisa full DISPLAY=..., bisa hanya code)
+          raw="${{ inputs.gh_crd_auth }}"
+          raw="$(echo "$raw" | sed 's/\r$//')"  # buang CR kalau ada
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+          echo "Raw gh_crd_auth:"
+          echo "$raw"
 
-    - name: Build, tag, and push image to Amazon ECR
-      id: build-image
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        # Build a docker container and
-        # push it to ECR so that it can
-        # be deployed to ECS.
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          # Ekstrak --code="...." atau --code=....
+          code=""
+          if [[ "$raw" =~ --code=\"([^\"]+)\" ]]; then
+            code="${BASHREMATCH[1]}"
+          elif [[ "$raw" =~ --code=([^[:space:]]+) ]]; then
+            code="${BASH_REMATCH[1]}"
+            # buang quote kalau ada
+            code="${code%\"}"
+            code="${code#\"}"
+          else
+            # Asumsi user cuma isi pure code (4/0Ab3...)
+            code="$raw"
+          fi
 
-    - name: Fill in the new image ID in the Amazon ECS task definition
-      id: task-def
-      uses: aws-actions/amazon-ecs-render-task-definition@v1
-      with:
-        task-definition: ${{ env.ECS_TASK_DEFINITION }}
-        container-name: ${{ env.CONTAINER_NAME }}
-        image: ${{ steps.build-image.outputs.image }}
+          echo "Resolved code: $code"
+          echo "Resolved runtime: $runtime"
 
-    - name: Deploy Amazon ECS task definition
-      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-      with:
-        task-definition: ${{ steps.task-def.outputs.task-definition }}
-        service: ${{ env.ECS_SERVICE }}
-        cluster: ${{ env.ECS_CLUSTER }}
-        wait-for-service-stability: true
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "pcname=${{ inputs.gh_pc_name }}" >> "$GITHUB_OUTPUT"
+          echo "pin=${{ inputs.gh_pin_crd }}" >> "$GITHUB_OUTPUT"
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "restore_mode=${{ inputs.restore_mode }}" >> "$GITHUB_OUTPUT"
+
+      - name: ♻ Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt
+          key: ${{ runner.os }}-apt-cache-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-cache-
+
+      - name: 📥 Instal Desktop + CRD + Browser
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --assume-yes --no-install-recommends \
+            xfce4 xfce4-terminal thunar desktop-base dbus-x11 xscreensaver wget curl unzip jq
+
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get -fy install
+
+          sudo apt-get install -y firefox
+          wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+          sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get -fy install
+
+      # === RESTORE PROFILE ===
+      - name: 🧩 Restore Profil Firefox
+        if: ${{ inputs.restore_mode == 'restore' }}
+        run: |
+          set -e
+          BACKUP_FILE="$HOME/ffprofile.zip"
+          SNAP_COMMON="/home/runner/snap/firefox/common/.mozilla/firefox"
+          SNAP_CURRENT="/home/runner/snap/firefox/current/.mozilla/firefox"
+          mkdir -p "$SNAP_COMMON" "$SNAP_CURRENT"
+
+          echo "📥 Mengunduh file backup profil..."
+          wget -q -O "$BACKUP_FILE" "https://github.com/Thorns2007/super-duper-computing-machine/releases/download/ffpu/ffprofile.zip" || true
+          if [ -s "$BACKUP_FILE" ]; then
+            unzip -oq "$BACKUP_FILE" -d "$SNAP_COMMON"
+            cp "$SNAP_COMMON/profiles.ini" "$SNAP_CURRENT/profiles.ini" || true
+            cp -rT "$SNAP_COMMON/default-release" "$SNAP_CURRENT/default-release" || true
+            chmod -R 777 /home/runner/snap/firefox || true
+            echo "✅ Restore profil selesai."
+          else
+            echo "⚠️ File backup tidak ditemukan, skip restore."
+          fi
+
+      - name: 🚀 Konfigurasi Chrome Remote Desktop
+        run: |
+          export MOZ_LEGACY_PROFILES=1
+          export MOZ_ALLOW_DOWNGRADE=1
+
+          code="${{ steps.cfg.outputs.code }}"
+          pcname="${{ steps.cfg.outputs.pcname }}"
+          pin="${{ steps.cfg.outputs.pin }}"
+
+          echo "Menggunakan CODE: $code"
+          echo "Nama PC: $pcname"
+
+          DISPLAY= /opt/google/chrome-remote-desktop/start-host \
+            --code="$code" \
+            --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+            --name="$pcname" \
+            --pin="$pin"
+
+      # === INSTALL EXTENSIONS - RESTORE MODE ===
+      - name: 🌐 Instal Extension Firefox & Chrome (Mode Restore)
+        if: ${{ inputs.restore_mode == 'restore' }}
+        run: |
+          echo "=== Instal Extension Firefox (Restore Mode) ==="
+          PF_CURRENT=$(find /home/runner/snap/firefox/current/.mozilla/firefox -maxdepth 1 -type d -name "*.default-release" | head -n 1 || true)
+          PF_COMMON="/home/runner/snap/firefox/common/.mozilla/firefox/default-release"
+          FIREFOX_PROFILE_PATH="${PF_CURRENT:-$PF_COMMON}"
+          mkdir -p "$FIREFOX_PROFILE_PATH/extensions"
+
+          wget -O ~/ublock_origin.xpi "https://addons.mozilla.org/firefox/downloads/file/4578681/ublock_origin-1.66.4.xpi"
+          wget -O ~/xdm_browser_monitor.xpi "https://addons.mozilla.org/firefox/downloads/file/3710348/xdm_browser_monitor-2.2.xpi"
+          wget -O ~/multi_account_containers.xpi "https://addons.mozilla.org/firefox/downloads/file/4494279/multi_account_containers-8.3.0.xpi"
+          wget -O ~/twitter_media_harvest.xpi "https://github.com/EltonChou/TwitterMediaHarvest/releases/download/v4.4.4/mediaharvest@mediaharvest.app-v4.4.4.xpi"
+
+          EXT_DIR="$FIREFOX_PROFILE_PATH/extensions"
+          for xpi in ~/ublock_origin.xpi ~/xdm_browser_monitor.xpi ~/multi_account_containers.xpi ~/twitter_media_harvest.xpi; do
+            tmpdir=$(mktemp -d)
+            unzip -qq "$xpi" -d "$tmpdir"
+            id=$(jq -r '.applications.gecko.id // .browser_specific_settings.gecko.id' "$tmpdir/manifest.json")
+            [ -n "$id" ] && cp "$xpi" "$EXT_DIR/$id.xpi"
+          done
+          echo "✅ Ekstensi Firefox mode restore terpasang."
+
+      # === INSTALL EXTENSIONS - NO RESTORE MODE ===
+      - name: 🌐 Instal Extension Firefox & Chrome (Mode No-Restore)
+        if: ${{ inputs.restore_mode == 'no-restore' }}
+        run: |
+          echo "=== Instal Extension Firefox (No-Restore Mode) ==="
+          sudo apt-get install -y jq unzip
+
+          FIREFOX_PROFILE_NAME="default-release"
+          FIREFOX_PROFILE_PATH="$HOME/.mozilla/firefox/${FIREFOX_PROFILE_NAME}"
+          mkdir -p "$FIREFOX_PROFILE_PATH"
+
+          cat <<EOF > "$HOME/.mozilla/firefox/profiles.ini"
+          [General]
+          StartWithLastProfile=1
+          [Profile0]
+          Name=$FIREFOX_PROFILE_NAME
+          IsRelative=1
+          Path=${FIREFOX_PROFILE_NAME}
+          Default=1
+          EOF
+
+          wget -O ~/ublock_origin.xpi "https://addons.mozilla.org/firefox/downloads/file/4578681/ublock_origin-1.66.4.xpi"
+          wget -O ~/xdm_browser_monitor.xpi "https://addons.mozilla.org/firefox/downloads/file/3710348/xdm_browser_monitor-2.2.xpi"
+          wget -O ~/multi_account_containers.xpi "https://addons.mozilla.org/firefox/downloads/file/4494279/multi_account_containers-8.3.0.xpi"
+          wget -O ~/twitter_media_harvest.xpi "https://github.com/EltonChou/TwitterMediaHarvest/releases/download/v4.4.4/mediaharvest@mediaharvest.app-v4.4.4.xpi"
+
+          EXT_DIR="$FIREFOX_PROFILE_PATH/extensions"
+          mkdir -p "$EXT_DIR"
+
+          for xpi in ~/ublock_origin.xpi ~/xdm_browser_monitor.xpi ~/multi_account_containers.xpi ~/twitter_media_harvest.xpi; do
+            tmpdir=$(mktemp -d)
+            unzip -qq "$xpi" -d "$tmpdir"
+            id=$(jq -r '.applications.gecko.id // .browser_specific_settings.gecko.id' "$tmpdir/manifest.json")
+            [ -n "$id" ] && cp "$xpi" "$EXT_DIR/$id.xpi"
+          done
+
+          cat <<EOF > "$FIREFOX_PROFILE_PATH/prefs.js"
+          user_pref("xpinstall.signatures.required", false);
+          user_pref("extensions.autoDisableScopes", 0);
+          user_pref("extensions.enabledScopes", 15);
+          user_pref("browser.startup.homepage", "https://www.google.com/");
+          EOF
+
+          echo "✅ Semua ekstensi Firefox (No-Restore) aktif."
+          echo "=== Instal Extension Chrome ==="
+          mkdir -p ~/.config/google-chrome/Default
+          sudo mkdir -p /etc/opt/chrome/policies/managed
+          cat <<EOF | sudo tee /etc/opt/chrome/policies/managed/extensions.json
+          {
+            "ExtensionInstallForcelist": [
+              "ddkjiahejlhfcafbddmgiahcphecmpfh;https://clients2.google.com/service/update2/crx",
+              "jonfefokggbliacanjbaiejmbclccocp;https://clients2.google.com/service/update2/crx"
+            ]
+          }
+          EOF
+
+      - name: 📥 Download passwords CSV ke ~/Downloads/pass.csv
+        run: |
+          mkdir -p "$HOME/Downloads"
+          CSV_URL="https://drive.google.com/uc?export=download&id=1DigM_oDo5EZl9yDJzVqiefyOulHr-LMt"
+          OUT="$HOME/Downloads/pass.csv"
+          wget -q -O "$OUT" "$CSV_URL"
+          [ -s "$OUT" ] && chmod 600 "$OUT" && echo "✅ File CSV tersimpan di $OUT"
+
+      - name: 📦 Instal Aplikasi Tambahan (XDM, FFmpeg, YT-DLP, MEGA)
+        run: |
+          echo "=== Instal XDM ==="
+          wget -O xdm-setup-7.2.11.tar.xz https://github.com/subhra74/xdm/releases/download/7.2.11/xdm-setup-7.2.11.tar.xz
+          tar -xvf xdm-setup-7.2.11.tar.xz && sudo ./install.sh
+          echo "=== Instal FFmpeg & YT-DLP ==="
+          sudo apt-get install -y ffmpeg python3 python3-pip jq unzip && python3 -m pip install -U yt-dlp
+
+      - name: ⏳ Menjaga sesi tetap aktif
+        run: |
+          runtime_mins="${{ steps.cfg.outputs.runtime }}"
+          end_time=$((SECONDS + runtime_mins * 60))
+          while [ $SECONDS -lt $end_time ]; do
+            remaining=$(( (end_time - SECONDS) / 60 ))
+            echo "⏳ Sesi aktif, sisa $remaining menit..."
+            sleep 60
+          done
+          echo "✅ Sesi selesai."
